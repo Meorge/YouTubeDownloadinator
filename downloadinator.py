@@ -2,6 +2,7 @@ from __future__ import unicode_literals
 import youtube_dl
 import re
 import threading
+import json
 
 from PyQt5 import QtWidgets, QtGui, QtCore
 import sys
@@ -12,17 +13,8 @@ from typing import List
 import os.path
 from mutagen.id3 import ID3, TPE1, TPE2, TIT2, TRCK, TALB, APIC, TYER, TCON, TRCK
 
-
-"""
-TODO:
- - Add function to TrackItem to download the song
- - After song is downloaded, it should apply metadata
- - File selector for thumbnail?
-
-"""
-
-
-url = "https://www.youtube.com/playlist?list=PLtPXiJedNjDFfsaMKnhsJyOZH823bXzMt"
+def updateProgress(d):
+    print(d)
 
 download_metadata_options = {
     'writesubtitles': True,
@@ -31,24 +23,19 @@ download_metadata_options = {
     'sleep_interval': 0,
     'max_sleep_interval': 0,
     'skip_download': True,
-    'simulate': True
+    'simulate': True,
+    'progress_hooks': [updateProgress],
 }
 
-def get_names_in_playlist(url):
-    try:
-        with youtube_dl.YoutubeDL(download_metadata_options) as ydl:
-            ie_result = ydl.extract_info(url, False)
-            if "_type" in ie_result: # it's a playlist
-                return ie_result["entries"]
-            else: # it's a single video
-                return ie_result
-    except Exception as e:
-        print(e)
-        return []
+important_keys = ["title", "duration", "webpage_url"]
 
 class TrackItem(QtCore.QObject):
     def __init__(self, parent, trackData={"title": "TITLE", "duration": 0}, trackIndex = (0,0)):
         super(TrackItem, self).__init__(parent)
+        self.__trackData = { key: trackData[key] for key in important_keys }
+        
+
+
         self.__rawName = trackData["title"]
         self.__trackTitle = trackData["title"]
         self.__trackArtist = "ARTIST"
@@ -98,6 +85,9 @@ class TrackItem(QtCore.QObject):
     def url(self):
         return self.__url
 
+    def trackData(self):
+        return self.__trackData
+
     def setTitle(self, title):
         self.__trackTitle = title
 
@@ -142,7 +132,6 @@ class TrackItem(QtCore.QObject):
             print(f"Track {self.title()} had an error while downloading")
             self.__progressBar.updateProgressBar(f"Error", (0, 1))
         elif d["status"] == "finished":
-            print(f"Track {self.title()} finished downloading, and is available at {d['filename']}")
             self.__progressBar.updateProgressBar(f"Processing", (0, 0))
 
     def downloadAsMP3(self):
@@ -150,10 +139,34 @@ class TrackItem(QtCore.QObject):
 
         self.__downloadThread.statusUpdated.connect(self.updateProgress)
         self.__downloadThread.startingProcessing.connect(lambda: self.__progressBar.updateProgressBar("Processing", (0,0)))
-        self.__downloadThread.allDone.connect(lambda: self.__progressBar.updateProgressBar("Done", (1,1)))
+        self.__downloadThread.allDone.connect(self.allDoneDownloading)
 
         self.__downloadThread.start()
 
+    def allDoneDownloading(self):
+        self.__progressBar.updateProgressBar("Done", (1,1))
+        self.parent().trackCompleted()
+
+class PlaylistMetadataDownloaderThread(QtCore.QThread):
+    complete = QtCore.pyqtSignal(object)
+    error = QtCore.pyqtSignal(object)
+
+    def __init__(self, parent, url):
+        super(PlaylistMetadataDownloaderThread, self).__init__(parent)
+        self.parent = parent
+        self.url = url
+
+    def run(self):
+        try:
+            with youtube_dl.YoutubeDL(download_metadata_options) as ydl:
+                ie_result = ydl.extract_info(self.url, False)
+                if "_type" in ie_result: # it's a playlist
+                    self.complete.emit(ie_result["entries"])
+                else: # it's a single video
+                    self.complete.emit(ie_result)
+        except Exception as e:
+            print(e)
+            self.error.emit(e)
 
 class TrackDownloaderThread(QtCore.QThread):
     statusUpdated = QtCore.pyqtSignal(object)
@@ -214,9 +227,6 @@ class TrackDownloaderThread(QtCore.QThread):
                             type=3, desc=u'Cover',
                             data=albumart.read()
                             ) 
-
-
-        print(f"TPE1={self.parent.artist()}, TIT2={self.parent.title()}, TALB={self.parent.album()}")
         mp3_file.save()
         self.allDone.emit()
 
@@ -279,6 +289,7 @@ class ProgressIndicator(QtWidgets.QWidget):
 
     def setupUI(self):
         self.__layout = QtWidgets.QHBoxLayout()
+        self.__layout.setContentsMargins(5,0,5,0)
 
         self.__label = QtWidgets.QLabel("Idle")
         self.__bar = QtWidgets.QProgressBar()
@@ -298,9 +309,12 @@ class MyWindow(QtWidgets.QMainWindow):
         QtWidgets.QMainWindow.__init__(self)
 
         self.track_list: List[TrackItem] = []
+        self.downloadingInProgress = True
+        self.tracksCompleted = 0
 
         self.leftHandQueue = QtWidgets.QTreeWidget()
-        self.leftHandQueue.setHeaderLabels(["Title", "Duration", "Progress"])
+        self.leftHandQueue.setHeaderLabels(["#", "Title", "Duration", "Progress"])
+        self.leftHandQueue.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
 
         self.rightHandDetailsWidget = QtWidgets.QWidget()
 
@@ -311,18 +325,32 @@ class MyWindow(QtWidgets.QMainWindow):
         self.overallLayout.addWidget(self.rightHandDetailsWidget)
         self.setCentralWidget(self.overallLayout)
 
+        self.setWindowTitle("YouTube Downloadinator")
+
         self.setUpRightHandSide()
 
     def setUpRightHandSide(self):
+        ## Set up Save/Load box
+        self.saveLoadBox = QtWidgets.QGroupBox("Configurations")
+        self.saveLoadBox.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Minimum)
+        self.saveLoadBox_load = QtWidgets.QPushButton("Load")
+        self.saveLoadBox_load.clicked.connect(self.loadConfig)
+        self.saveLoadBox_save = QtWidgets.QPushButton("Save")
+        self.saveLoadBox_save.clicked.connect(self.saveConfig)
+        self.saveLoadLayout = QtWidgets.QHBoxLayout()
+        self.saveLoadLayout.addWidget(self.saveLoadBox_load)
+        self.saveLoadLayout.addWidget(self.saveLoadBox_save)
+        self.saveLoadBox.setLayout(self.saveLoadLayout)
+
         ## Set up Playlist URL box
         self.urlGroupBox = QtWidgets.QGroupBox("Playlist URL")
         self.urlGroupBox.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Minimum)
 
         self.urlGroupBox_lineEntry = QtWidgets.QLineEdit("https://www.youtube.com/playlist?list=PLtPXiJedNjDFfsaMKnhsJyOZH823bXzMt")
-        self.urlGroupBox_goButton = QtWidgets.QPushButton(">")
+        self.urlGroupBox_goButton = QtWidgets.QPushButton("Download metadata")
         self.urlGroupBox_goButton.clicked.connect(self.downloadTrackList)
 
-        self.urlEntryLayout = QtWidgets.QHBoxLayout()
+        self.urlEntryLayout = QtWidgets.QVBoxLayout()
         self.urlEntryLayout.addWidget(self.urlGroupBox_lineEntry)
         self.urlEntryLayout.addWidget(self.urlGroupBox_goButton)
         self.urlGroupBox.setLayout(self.urlEntryLayout)
@@ -354,17 +382,74 @@ class MyWindow(QtWidgets.QMainWindow):
         self.downloadButton.clicked.connect(self.downloadTracks)
 
         ## Final stuff
+        self.rightHandDetailsLayout.addWidget(self.saveLoadBox)
+        self.rightHandDetailsLayout.addSpacing(10)
         self.rightHandDetailsLayout.addWidget(self.urlGroupBox)
+        self.rightHandDetailsLayout.addSpacing(10)
         self.rightHandDetailsLayout.addWidget(self.albumDataGroupBox)
+        self.rightHandDetailsLayout.addSpacing(10)
 
         self.rightHandDetailsLayout.addWidget(self.previewButton)
         self.rightHandDetailsLayout.addWidget(self.downloadButton)
 
         self.rightHandDetailsWidget.setLayout(self.rightHandDetailsLayout)
+
+        self.updatePreview()
+
+    def saveConfig(self):
+        fileName, _ = QtWidgets.QFileDialog.getSaveFileName(self,"Save configuration file","","JSON file (*.json)")
+        if not fileName:
+            return
+        _file = open(fileName, "w")
+        json.dump(self.getConfigDictionary(), _file)
+        _file.close()
+
+    def loadConfig(self):
+        fileName, _ = QtWidgets.QFileDialog.getOpenFileName(self,"Open configuration file","","JSON file (*.json)")
+        if not fileName:
+            return
+        _file = open(fileName, "r")
+        self.loadConfigDictionary(json.load(_file))
+        _file.close()
+
+    def loadConfigDictionary(self, dict):
+        self.urlGroupBox_lineEntry.setText(dict["playlist_url"])
+        self.songNameRegexLineEdit.setText(dict["title_pattern"])
+        self.albumDataGroupBox_artistName.setText(dict["artist"])
+        self.albumDataGroupBox_albumName.setText(dict["album"])
+        self.albumDataGroupBox_year.setText(dict["year"])
+        self.albumDataGroupBox_artworkPicker.setArtworkPath(dict["album_art_path"])
+        
+        track_index = 1
+        for track_item in dict["tracks"]:
+            self.track_list.append(TrackItem(self, track_item, (track_index, len(dict["tracks"]))))
+            track_index += 1
+
+        self.updatePreview()
+
+    def getConfigDictionary(self):
+        return {
+            "playlist_url": self.urlGroupBox_lineEntry.text(),
+            "title_pattern": self.songNameRegexLineEdit.text(),
+            "artist": self.albumDataGroupBox_artistName.text(),
+            "album": self.albumDataGroupBox_albumName.text(),
+            "year": self.albumDataGroupBox_year.text(),
+            "album_art_path": self.albumDataGroupBox_artworkPicker.artworkPath(),
+            "tracks": [track_item.trackData() for track_item in self.track_list]
+        }
     
     def downloadTrackList(self):
         print("Download track list")
-        data = get_names_in_playlist(self.urlGroupBox_lineEntry.text())
+        playlistMetadataThread = PlaylistMetadataDownloaderThread(self, self.urlGroupBox_lineEntry.text())
+        playlistMetadataThread.complete.connect(self.trackListDownloaded)
+        playlistMetadataThread.start()
+
+        self.urlGroupBox_goButton.setEnabled(False)
+        self.saveLoadBox.setEnabled(False)
+        self.urlGroupBox_lineEntry.setEnabled(False)
+        self.repaint()
+
+    def trackListDownloaded(self, data):
         self.track_list.clear()
 
         trackIndex = 1
@@ -373,6 +458,18 @@ class MyWindow(QtWidgets.QMainWindow):
             trackIndex += 1
 
         self.updatePreview()
+
+        self.urlGroupBox_goButton.setEnabled(True)
+        self.saveLoadBox.setEnabled(True)
+        self.urlGroupBox_lineEntry.setEnabled(True)
+        self.repaint()
+
+
+    def setButtonsEnabled(self, enabled):
+        # self.albumDataGroupBox.setEnabled(enabled)
+        self.previewButton.setEnabled(enabled)
+        self.downloadButton.setEnabled(enabled)
+        self.repaint()
         
 
     def updatePreview(self):
@@ -397,13 +494,16 @@ class MyWindow(QtWidgets.QMainWindow):
 
         while self.leftHandQueue.takeTopLevelItem(0) is not None: pass
 
+        self.setButtonsEnabled(len(self.track_list) != 0)
+
         for track in self.track_list:
             new_list_item = QtWidgets.QTreeWidgetItem()
-            new_list_item.setText(0, track.title())
-            new_list_item.setText(1, str(track.readableDuration()))
+            new_list_item.setText(0, str(track.trackIndex()[0]))
+            new_list_item.setText(1, track.title())
+            new_list_item.setText(2, str(track.readableDuration()))
         
             self.leftHandQueue.addTopLevelItem(new_list_item)
-            self.leftHandQueue.setItemWidget(new_list_item, 2, track.progressBar())
+            self.leftHandQueue.setItemWidget(new_list_item, 3, track.progressBar())
 
 
     def downloadTracks(self):
@@ -414,8 +514,27 @@ class MyWindow(QtWidgets.QMainWindow):
         albumName = self.albumDataGroupBox_albumName.text()
         if not os.path.isdir(albumName): os.mkdir(albumName)
 
+        self.downloadingInProgress = True
+        self.tracksCompleted = 0
+
+        self.urlGroupBox.setEnabled(False)
+        self.albumDataGroupBox.setEnabled(False)
+        self.setButtonsEnabled(False)
+
+
         for track in self.track_list:
             track.downloadAsMP3()
+
+    def trackCompleted(self):
+        self.tracksCompleted += 1
+        if self.tracksCompleted == len(self.track_list):
+            self.allTracksCompleted()
+
+    def allTracksCompleted(self):
+        self.downloadingInProgress = False
+        self.urlGroupBox.setEnabled(True)
+        self.albumDataGroupBox.setEnabled(True)
+        self.setButtonsEnabled(True)
 
 
 if __name__ == "__main__":
