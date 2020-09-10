@@ -211,7 +211,6 @@ class TrackDownloaderThread(QtCore.QThread):
         mp3_file['TPE1'] = TPE1(encoding=3, text=self.parent.artist())
         mp3_file['TPE2'] = TPE2(encoding=3, text=self.parent.artist())
         mp3_file['TPE3'] = TPE2(encoding=3, text=self.parent.artist())
-        mp3_file['TIT2'] = TALB(encoding=3, text=self.parent.title())
         mp3_file['TALB'] = TALB(encoding=3, text=self.parent.album())
         mp3_file['TYER'] = TYER(encoding=3, text=self.parent.year())
         mp3_file['TCON'] = TCON(encoding=3, text=self.parent.genre())
