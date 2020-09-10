@@ -1,1 +1,4 @@
 .vscode/settings.json
+*.mp3
+.DS_Store
+test_dl.py

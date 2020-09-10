@@ -1,3 +1,4 @@
+from __future__ import unicode_literals
 import youtube_dl
 import re
 
@@ -18,10 +19,10 @@ TODO:
 
 """
 
-file_name = "outfile.mp4"
+
 url = "https://www.youtube.com/playlist?list=PLtPXiJedNjDFfsaMKnhsJyOZH823bXzMt"
-ydl_opts = {
-    'outtmpl': file_name,
+
+download_metadata_options = {
     'writesubtitles': True,
     'format': 'mp4',
     'writethumbnail': True,
@@ -33,7 +34,7 @@ ydl_opts = {
 
 def get_names_in_playlist(url):
     try:
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+        with youtube_dl.YoutubeDL(download_metadata_options) as ydl:
             ie_result = ydl.extract_info(url, False)
             if "_type" in ie_result: # it's a playlist
                 return ie_result["entries"]
@@ -100,6 +101,36 @@ class TrackItem:
             self.setTitle(regexMatches.group(1))
 
 
+    def updateProgress(self, d):
+        if d["status"] == "downloading":
+            downloaded_bytes = d["downloaded_bytes"]
+            total_bytes = d["total_bytes"] if "total_bytes" in d else (d["total_bytes_estimate"] if "total_bytes_estimate" in d else None)
+
+            print(f"Track {self.title()} is downloading: {downloaded_bytes} / {total_bytes if total_bytes is not None else '???'}")
+        elif d["status"] == "error":
+            print(f"Track {self.title()} had an error while downloading")
+        elif d["status"] == "finished":
+            print(f"Track {self.title()} finished downloading, and is available at {d['filename']}")
+
+    def downloadAsMP3(self):
+        download_mp3_options = {
+            'format': 'bestaudio/best',
+            'outtmpl': f"{self.title()}.",
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '320',
+            }],
+            'prefer_ffmpeg': True,
+            'keepvideo': False,
+            # 'quiet': True,
+            'verbose': True,
+            'progress_hooks': [self.updateProgress],
+        }
+
+        with youtube_dl.YoutubeDL(download_mp3_options) as ydl:
+            ydl.download([self.url()])
+
 class MyWindow(QtWidgets.QMainWindow):
     def __init__(self):
         QtWidgets.QMainWindow.__init__(self)
@@ -107,7 +138,7 @@ class MyWindow(QtWidgets.QMainWindow):
         self.track_list: List[TrackItem] = []
 
         self.leftHandQueue = QtWidgets.QTreeWidget()
-        self.leftHandQueue.setHeaderLabels(["Title", "Duration"])
+        self.leftHandQueue.setHeaderLabels(["Title", "Duration", "Progress"])
 
         self.rightHandDetailsWidget = QtWidgets.QWidget()
 
@@ -153,6 +184,7 @@ class MyWindow(QtWidgets.QMainWindow):
         self.previewButton = QtWidgets.QPushButton("Preview")
         self.previewButton.clicked.connect(self.updatePreview)
         self.downloadButton = QtWidgets.QPushButton("Download")
+        self.downloadButton.clicked.connect(self.downloadTracks)
 
         ## Final stuff
         self.rightHandDetailsLayout.addWidget(self.urlGroupBox)
@@ -193,8 +225,13 @@ class MyWindow(QtWidgets.QMainWindow):
             new_list_item = QtWidgets.QTreeWidgetItem()
             new_list_item.setText(0, track.title())
             new_list_item.setText(1, str(track.readableDuration()))
-
+        
             self.leftHandQueue.addTopLevelItem(new_list_item)
+            self.leftHandQueue.setItemWidget(new_list_item, 2, QtWidgets.QProgressBar())
+
+    def downloadTracks(self):
+        for track in self.track_list:
+            track.downloadAsMP3()
 
 
 # print(get_names_in_playlist("https://www.youtube.com/watch?v=WJyaIvAGwqI&"))
