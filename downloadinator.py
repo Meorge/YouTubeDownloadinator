@@ -12,6 +12,7 @@ from typing import List
 
 import os.path
 from mutagen.id3 import ID3, TPE1, TPE2, TIT2, TRCK, TALB, APIC, TYER, TCON, TRCK
+from mutagen.mp4 import MP4, MP4Cover
 
 def updateProgress(d):
     print(d)
@@ -48,6 +49,8 @@ class TrackItem(QtCore.QObject):
         self.__url = trackData["webpage_url"]
 
         self.__trackIndex = trackIndex
+
+        
 
         self.__progressBar: ProgressIndicator = None
         self.__downloadThread = None
@@ -188,10 +191,10 @@ class TrackDownloaderThread(QtCore.QThread):
     def downloadAsMP3Thread(self):
         download_mp3_options = {
             'format': 'bestaudio/best',
-            'outtmpl': f"{self.parent.album()}/{self.parent.title()}.",
+            'outtmpl': self.parent.album() + "/" + self.parent.title().replace('/', '\/') + ".",
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
+                'preferredcodec': 'm4a',
                 'preferredquality': '320',
             }],
             'prefer_ffmpeg': True,
@@ -203,7 +206,27 @@ class TrackDownloaderThread(QtCore.QThread):
         with youtube_dl.YoutubeDL(download_mp3_options) as ydl:
             ydl.download([self.parent.url()])
 
-        self.setMP3Metadata()
+        self.setM4AMetadata()
+
+
+    def setM4AMetadata(self):
+        self.startingProcessing.emit()
+        tags = MP4(f"{self.parent.album()}/{self.parent.title()}.m4a").tags
+        tags['\xa9nam'] = self.parent.title()
+        tags['\xa9alb'] = self.parent.album()
+        tags['\xa9ART'] = self.parent.artist()
+        tags['aART'] = self.parent.artist()
+        tags['\xa9wrt'] = self.parent.artist()
+        tags['\xa9day'] = self.parent.year()
+        tags['trkn'] = [self.parent.trackIndex()]
+
+        with open(self.parent.albumArtPath(), 'rb') as albumart:
+            tags['covr'] = [MP4Cover(albumart.read(), MP4Cover.FORMAT_PNG)]
+
+        tags.save(f"{self.parent.album()}/{self.parent.title()}.m4a")
+
+
+        self.allDone.emit()
 
     def setMP3Metadata(self):
         self.startingProcessing.emit()
