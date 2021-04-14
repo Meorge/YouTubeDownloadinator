@@ -28,7 +28,9 @@ download_metadata_options = {
     'progress_hooks': [updateProgress],
 }
 
-important_keys = ["title", "duration", "webpage_url"]
+download_all_at_once = False
+
+important_keys = ["title", "duration", "webpage_url", "index"]
 
 class TrackItem(QtCore.QObject):
     def __init__(self, parent, trackData={"title": "TITLE", "duration": 0}, trackIndex = (0,0)):
@@ -164,6 +166,12 @@ class PlaylistMetadataDownloaderThread(QtCore.QThread):
             with youtube_dl.YoutubeDL(download_metadata_options) as ydl:
                 ie_result = ydl.extract_info(self.url, False)
                 if "_type" in ie_result: # it's a playlist
+
+                    index = 1
+                    for i in ie_result["entries"]:
+                        i["index"] = index
+                        index += 1
+
                     self.complete.emit(ie_result["entries"])
                 else: # it's a single video
                     self.complete.emit(ie_result)
@@ -331,6 +339,7 @@ class MyWindow(QtWidgets.QMainWindow):
         QtWidgets.QMainWindow.__init__(self)
 
         self.track_list: List[TrackItem] = []
+        self.current_track_index = 0
         self.downloadingInProgress = True
         self.tracksCompleted = 0
 
@@ -423,7 +432,7 @@ class MyWindow(QtWidgets.QMainWindow):
         if not fileName:
             return
         _file = open(fileName, "w")
-        json.dump(self.getConfigDictionary(), _file)
+        json.dump(self.getConfigDictionary(), _file, indent=4)
         _file.close()
 
     def loadConfig(self):
@@ -442,10 +451,8 @@ class MyWindow(QtWidgets.QMainWindow):
         self.albumDataGroupBox_year.setText(dict["year"])
         self.albumDataGroupBox_artworkPicker.setArtworkPath(dict["album_art_path"])
         
-        track_index = 1
         for track_item in dict["tracks"]:
-            self.track_list.append(TrackItem(self, track_item, (track_index, len(dict["tracks"]))))
-            track_index += 1
+            self.track_list.append(TrackItem(self, track_item, (track_item["index"], len(dict["tracks"]))))
 
         self.updatePreview()
 
@@ -474,10 +481,8 @@ class MyWindow(QtWidgets.QMainWindow):
     def trackListDownloaded(self, data):
         self.track_list.clear()
 
-        trackIndex = 1
         for track in data:
-            self.track_list.append(TrackItem(self, track, (trackIndex, len(data))))
-            trackIndex += 1
+            self.track_list.append(TrackItem(self, track, (track["index"], len(data))))
 
         self.updatePreview()
 
@@ -544,13 +549,26 @@ class MyWindow(QtWidgets.QMainWindow):
         self.setButtonsEnabled(False)
 
 
-        for track in self.track_list:
-            track.downloadAsMP3()
+        if download_all_at_once:
+            for track in self.track_list:
+                track.downloadAsMP3()
+
+        else:
+            # don't download all at once
+            # Instead, start by downloading the first one
+            # and once that's done, start downloading the next one...
+            self.current_track_index = 0
+            self.track_list[self.current_track_index].downloadAsMP3()
 
     def trackCompleted(self):
         self.tracksCompleted += 1
         if self.tracksCompleted == len(self.track_list):
             self.allTracksCompleted()
+            return
+
+        if not download_all_at_once:
+            self.current_track_index += 1
+            self.track_list[self.current_track_index].downloadAsMP3()
 
     def allTracksCompleted(self):
         self.downloadingInProgress = False
